@@ -1,6 +1,6 @@
 import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from telegram.ext import Application, CommandHandler
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler
 
 from config import BOT_TOKEN, TIMEZONE, LOG_LEVEL
 from bot.database.connection import init_db
@@ -9,6 +9,7 @@ from bot.handlers.start import start_handler, help_handler
 from bot.handlers.tasks import add_task, list_tasks, done_task, delete_task
 from bot.handlers.reminders import remind_handler, list_reminders, cancel_reminder
 from bot.handlers.stats import stats_handler
+from bot.handlers.callbacks import button_callback
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)-8s | %(name)s — %(message)s",
@@ -52,6 +53,7 @@ def main() -> None:
     app.add_handler(CommandHandler("reminders", list_reminders))
     app.add_handler(CommandHandler("cancel",    cancel_reminder))
     app.add_handler(CommandHandler("stats",     stats_handler))
+    app.add_handler(CallbackQueryHandler(button_callback))
 
     logger.info("Bot is starting...")
     app.run_polling()

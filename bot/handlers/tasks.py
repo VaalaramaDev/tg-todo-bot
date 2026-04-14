@@ -1,9 +1,45 @@
 import logging
+from datetime import datetime, timezone
 from telegram import Update
 from telegram.ext import ContextTypes
 from bot.database import queries
+from bot.keyboards import (
+    tasks_action_keyboard,
+    after_add_keyboard,
+    after_done_keyboard,
+    after_delete_keyboard,
+    back_home_keyboard,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def build_task_list_text(user_id: int) -> str:
+    """
+    Build the formatted task list string for a user.
+
+    Returns a ready-to-send string. Includes 🔔 HH:MM badge for tasks
+    that have an active reminder. Returns an empty string if no tasks.
+    """
+    tasks = queries.get_tasks(user_id)
+    if not tasks:
+        return ""
+
+    # Build a map of task_id → remind_time for quick lookup.
+    reminders = queries.get_reminders(user_id)
+    reminder_map = {row["task_id"]: row["remind_time"] for row in reminders}
+
+    count = len(tasks)
+    lines = [f"📋 Your tasks   {count} active\n"]
+    for index, task in enumerate(tasks, start=1):
+        reminder_badge = ""
+        if task["id"] in reminder_map:
+            reminder_badge = f"   🔔 {reminder_map[task['id']]}"
+        lines.append(f" {index} ○  {task['text']}{reminder_badge}")
+
+    lines.append("\nUse ✅ Mark done or 🗑 Delete to manage tasks.")
+    lines.append("To set a reminder: /remind <n> HH:MM")
+    return "\n".join(lines)
 
 
 async def add_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -12,40 +48,37 @@ async def add_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if not context.args:
         await update.message.reply_text(
-            "⚠️ Usage: /add <task text>\nExample: /add Buy groceries"
+            "⚠️ Usage: /add <task text>\nExample: /add Buy groceries",
+            reply_markup=back_home_keyboard(),
         )
         return
 
     text = " ".join(context.args)
-    task_id = queries.add_task(user_id, text)
+    queries.add_task(user_id, text)
 
-    # Determine the 1-based display index of the newly added task.
     tasks = queries.get_tasks(user_id)
-    display_index = len(tasks)  # new task is always last
+    display_index = len(tasks)
+    count = len(tasks)
 
     await update.message.reply_text(
-        f"✅ Task added!\n\n#{display_index} {text}"
+        f"✅ Task added!\n\n#{display_index}  {text}\n\nYou now have {count} active task{'s' if count != 1 else ''}.",
+        reply_markup=after_add_keyboard(),
     )
 
 
 async def list_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /list — show all pending tasks for the user."""
     user_id = update.effective_user.id
-    tasks = queries.get_tasks(user_id)
+    text = build_task_list_text(user_id)
 
-    if not tasks:
+    if not text:
         await update.message.reply_text(
-            "✅ You have no active tasks. Use /add to create one!"
+            "✅ You have no active tasks!\n\nTap ➕ Add task to create your first one.",
+            reply_markup=after_add_keyboard(),
         )
         return
 
-    lines = ["📋 *Your tasks:*\n"]
-    for index, task in enumerate(tasks, start=1):
-        lines.append(f"{index}. {task['text']}")
-
-    count = len(tasks)
-    lines.append(f"\nTotal: {count} active task{'s' if count != 1 else ''}")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text(text, reply_markup=tasks_action_keyboard())
 
 
 async def done_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -54,7 +87,8 @@ async def done_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if not context.args or not context.args[0].isdigit():
         await update.message.reply_text(
-            "⚠️ Usage: /done <task number>\nExample: /done 2"
+            "⚠️ Usage: /done <task number>\nExample: /done 2",
+            reply_markup=back_home_keyboard(),
         )
         return
 
@@ -63,19 +97,32 @@ async def done_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if task is None:
         await update.message.reply_text(
-            f"❌ Task #{display_index} not found. Use /list to see your tasks."
+            f"❌ Task #{display_index} not found. Use /list to see your tasks.",
+            reply_markup=back_home_keyboard(),
         )
         return
 
     updated = queries.mark_done(task["id"], user_id)
-    if updated:
+    if not updated:
         await update.message.reply_text(
-            f'🎉 Task #{display_index} completed!\n\n"{task["text"]}"'
+            f"❌ Could not complete task #{display_index}. It may already be done.",
+            reply_markup=back_home_keyboard(),
         )
-    else:
-        await update.message.reply_text(
-            f"❌ Could not complete task #{display_index}. It may already be done."
-        )
+        return
+
+    now_utc = datetime.now(timezone.utc)
+    timestamp = now_utc.strftime("%b %d · %H:%M UTC")
+    remaining = len(queries.get_tasks(user_id))
+    remaining_text = (
+        f"{remaining} task{'s' if remaining != 1 else ''} remaining."
+        if remaining > 0
+        else "No tasks left — you're all caught up! 🏆"
+    )
+
+    await update.message.reply_text(
+        f'🎉 Done!\n\n"{task["text"]}" — completed ✓\n{timestamp}\n\n{remaining_text}',
+        reply_markup=after_done_keyboard(),
+    )
 
 
 async def delete_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -84,7 +131,8 @@ async def delete_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if not context.args or not context.args[0].isdigit():
         await update.message.reply_text(
-            "⚠️ Usage: /delete <task number>\nExample: /delete 3"
+            "⚠️ Usage: /delete <task number>\nExample: /delete 3",
+            reply_markup=back_home_keyboard(),
         )
         return
 
@@ -93,16 +141,19 @@ async def delete_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if task is None:
         await update.message.reply_text(
-            f"❌ Task #{display_index} not found. Use /list to see your tasks."
+            f"❌ Task #{display_index} not found. Use /list to see your tasks.",
+            reply_markup=back_home_keyboard(),
         )
         return
 
     deleted = queries.delete_task(task["id"], user_id)
     if deleted:
         await update.message.reply_text(
-            f'🗑️ Task #{display_index} deleted.\n\n"{task["text"]}"'
+            f'🗑 Deleted.\n\n"{task["text"]}" has been removed.',
+            reply_markup=after_delete_keyboard(),
         )
     else:
         await update.message.reply_text(
-            f"❌ Could not delete task #{display_index}."
+            f"❌ Could not delete task #{display_index}.",
+            reply_markup=back_home_keyboard(),
         )
